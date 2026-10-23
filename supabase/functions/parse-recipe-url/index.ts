@@ -113,10 +113,10 @@ Deno.serve(async (req) => {
       return fail("Couldn't find a recipe on that page.", 422);
     }
 
-    let response: Anthropic.Beta.BetaMessage;
+    let response: Anthropic.Message;
     try {
-      response = await anthropic.beta.messages.create({
-        model: 'claude-opus-5-5',
+      response = await anthropic.messages.create({
+        model: 'claude-haiku-5-5',
         max_tokens: 16000,
         system: AI_SYSTEM,
         messages: [{ role: 'user', content: `Page: ${parsedUrl.href}\n\n${pageText}` }],
@@ -124,9 +124,6 @@ Deno.serve(async (req) => {
           effort: 'low',
           format: { type: 'json_schema', schema: RECIPE_SCHEMA },
         },
-        // If a request is ever declined, retry it on Anthropic's recommended fallback model
-        betas: ['server-side-fallback-2026-07-01'],
-        fallbacks: 'default',
       });
     } catch (error) {
       console.error('Claude API error:', error);
