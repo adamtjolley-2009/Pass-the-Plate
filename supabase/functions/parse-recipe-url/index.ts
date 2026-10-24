@@ -12,7 +12,9 @@ const json = (body: unknown, status = 200) =>
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
 
-const fail = (error: string, status: number) => json({ success: false, error }, status);
+// `code` lets the app react, e.g. offer "paste the recipe text" when a site blocks us
+const fail = (error: string, status: number, code?: 'blocked' | 'no_recipe') =>
+  json({ success: false, error, code }, status);
 
 // Claude reads the page text when a site has no structured recipe data.
 // Set the ANTHROPIC_API_KEY secret in Supabase to enable it.
@@ -52,13 +54,72 @@ const RECIPE_SCHEMA = {
   additionalProperties: false,
 };
 
+// Asks Claude to pull the recipe out of page text (fetched by us, or pasted by the user)
+async function readWithClaude(pageText: string, source?: string): Promise<Response> {
+  if (!anthropic) {
+    console.error('ANTHROPIC_API_KEY is not set; skipping AI fallback');
+    return source
+      ? fail("Couldn't find a recipe on that page.", 422, 'no_recipe')
+      : fail("Reading pasted recipes isn't set up yet. Add the Anthropic API key in Supabase.", 500);
+  }
+
+  let response: Anthropic.Message;
+  try {
+    response = await anthropic.messages.create({
+      model: 'claude-haiku-5-5',
+      max_tokens: 16000,
+      system: AI_SYSTEM,
+      messages: [{ role: 'user', content: source ? `Page: ${source}\n\n${pageText}` : pageText }],
+      output_config: {
+        effort: 'low',
+        format: { type: 'json_schema', schema: RECIPE_SCHEMA },
+      },
+    });
+  } catch (error) {
+    console.error('Claude API error:', error);
+    if (error instanceof Anthropic.RateLimitError) {
+      return fail('Too many imports right now. Please try again in a minute.', 429);
+    }
+    if (error instanceof Anthropic.AuthenticationError || error instanceof Anthropic.PermissionDeniedError) {
+      return fail("Recipe import isn't set up correctly. Check the Anthropic API key in Supabase.", 500);
+    }
+    return fail('The recipe reader is having trouble right now. Please try again.', 502);
+  }
+
+  if (response.stop_reason === 'refusal') {
+    console.error('Claude declined:', response.stop_details);
+    return fail("Couldn't find a recipe on that page.", 422, 'no_recipe');
+  }
+  const content = response.content
+    .map((block) => (block.type === 'text' ? block.text : ''))
+    .join('');
+  const parsed = parseAiJson(content);
+  const recipe = parsed ? normalizeAiRecipe(parsed) : null;
+  if (!recipe) {
+    console.error('Unusable AI response:', response.stop_reason, content.slice(0, 500));
+    return fail("Couldn't find a recipe in that text.", 422, 'no_recipe');
+  }
+
+  return json({ success: true, recipe, source: 'ai' });
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { url } = await req.json().catch(() => ({}));
+    const { url, text } = await req.json().catch(() => ({}));
+
+    // Recipe text the user copied from a page we couldn't fetch
+    if (typeof text === 'string') {
+      const pageText = text.trim().slice(0, 30000);
+      if (pageText.length < 50) {
+        return fail('Paste the whole recipe, including the ingredients and steps.', 400);
+      }
+      return await readWithClaude(pageText);
+    }
+
     let parsedUrl: URL | null = null;
     try {
       parsedUrl = typeof url === 'string' ? new URL(url.trim()) : null;
@@ -76,8 +137,14 @@ Deno.serve(async (req) => {
           // Many recipe sites refuse requests that don't look like a browser
           'User-Agent':
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
+          'Cache-Control': 'no-cache',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1',
         },
         redirect: 'follow',
         signal: AbortSignal.timeout(15000),
@@ -88,7 +155,8 @@ Deno.serve(async (req) => {
     }
 
     if (pageRes.status === 401 || pageRes.status === 403 || pageRes.status === 429) {
-      return fail('That website blocked the import. You can still copy the recipe in by hand.', 502);
+      console.error('Blocked by site:', parsedUrl.hostname, pageRes.status);
+      return fail("That website doesn't allow automatic imports. Paste the recipe text instead.", 502, 'blocked');
     }
     if (!pageRes.ok) {
       return fail(`That page couldn't be loaded (error ${pageRes.status}). Check the link and try again.`, 502);
@@ -103,54 +171,11 @@ Deno.serve(async (req) => {
     }
 
     // Otherwise ask Claude to read the page text
-    if (!anthropic) {
-      console.error('ANTHROPIC_API_KEY is not set; skipping AI fallback');
-      return fail("Couldn't find a recipe on that page.", 422);
-    }
-
     const pageText = htmlToText(html).slice(0, 30000);
     if (pageText.length < 100) {
-      return fail("Couldn't find a recipe on that page.", 422);
+      return fail("Couldn't find a recipe on that page.", 422, 'no_recipe');
     }
-
-    let response: Anthropic.Message;
-    try {
-      response = await anthropic.messages.create({
-        model: 'claude-haiku-5-5',
-        max_tokens: 16000,
-        system: AI_SYSTEM,
-        messages: [{ role: 'user', content: `Page: ${parsedUrl.href}\n\n${pageText}` }],
-        output_config: {
-          effort: 'low',
-          format: { type: 'json_schema', schema: RECIPE_SCHEMA },
-        },
-      });
-    } catch (error) {
-      console.error('Claude API error:', error);
-      if (error instanceof Anthropic.RateLimitError) {
-        return fail('Too many imports right now. Please try again in a minute.', 429);
-      }
-      if (error instanceof Anthropic.AuthenticationError || error instanceof Anthropic.PermissionDeniedError) {
-        return fail("Recipe import isn't set up correctly. Check the Anthropic API key in Supabase.", 500);
-      }
-      return fail('The recipe reader is having trouble right now. Please try again.', 502);
-    }
-
-    if (response.stop_reason === 'refusal') {
-      console.error('Claude declined:', response.stop_details);
-      return fail("Couldn't find a recipe on that page.", 422);
-    }
-    const content = response.content
-      .map((block) => (block.type === 'text' ? block.text : ''))
-      .join('');
-    const parsed = parseAiJson(content);
-    const recipe = parsed ? normalizeAiRecipe(parsed) : null;
-    if (!recipe) {
-      console.error('Unusable AI response:', response.stop_reason, content.slice(0, 500));
-      return fail("Couldn't find a recipe on that page.", 422);
-    }
-
-    return json({ success: true, recipe, source: 'ai' });
+    return await readWithClaude(pageText, parsedUrl.href);
   } catch (error) {
     console.error('Parse error:', error);
     return fail('Something went wrong importing that recipe. Please try again.', 500);

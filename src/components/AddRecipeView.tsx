@@ -31,18 +31,19 @@ export function AddRecipeView() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [recipeUrl, setRecipeUrl] = useState("");
   const [importing, setImporting] = useState(false);
+  const [showPaste, setShowPaste] = useState(false);
+  const [pastedText, setPastedText] = useState("");
 
-  const handleImportUrl = async () => {
-    if (!recipeUrl.trim()) return;
-    // Accept links pasted without "https://", e.g. "allrecipes.com/recipe/..."
-    const url = /^https?:\/\//i.test(recipeUrl.trim()) ? recipeUrl.trim() : `https://${recipeUrl.trim()}`;
+  // Sends a link (or pasted page text) to the importer and fills in the form
+  const runImport = async (body: { url: string } | { text: string }) => {
     setImporting(true);
     try {
-      const { data, error } = await supabase.functions.invoke("parse-recipe-url", { body: { url } });
+      const { data, error } = await supabase.functions.invoke("parse-recipe-url", { body });
       if (error) {
         // The function explains what went wrong in its response body
-        const body = await (error as { context?: Response }).context?.json?.().catch(() => null);
-        throw new Error(body?.error || "Couldn't import that recipe. Please try again.");
+        const details = await (error as { context?: Response }).context?.json?.().catch(() => null);
+        if (details?.code === "blocked" || details?.code === "no_recipe") setShowPaste(true);
+        throw new Error(details?.error || "Couldn't import that recipe. Please try again.");
       }
       if (!data?.success || !data?.recipe) throw new Error(data?.error || "Couldn't find a recipe on that page.");
 
@@ -60,13 +61,26 @@ export function AddRecipeView() {
         );
       }
       if (r.category && categories.includes(r.category)) setCategory(r.category);
+      setShowPaste(false);
+      setPastedText("");
       toast.success("Recipe imported! Review and save when ready.");
     } catch (err) {
       console.error("Import error:", err);
-      toast.error(err instanceof Error && err.message ? err.message : "Failed to import recipe from URL");
+      toast.error(err instanceof Error && err.message ? err.message : "Failed to import recipe");
     } finally {
       setImporting(false);
     }
+  };
+
+  const handleImportUrl = () => {
+    if (!recipeUrl.trim()) return;
+    // Accept links pasted without "https://", e.g. "allrecipes.com/recipe/..."
+    const url = /^https?:\/\//i.test(recipeUrl.trim()) ? recipeUrl.trim() : `https://${recipeUrl.trim()}`;
+    runImport({ url });
+  };
+
+  const handleImportText = () => {
+    if (pastedText.trim()) runImport({ text: pastedText });
   };
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -198,7 +212,57 @@ export function AddRecipeView() {
               {importing ? "Importing..." : "Import"}
             </button>
           </div>
-          <p className="mt-1 text-xs text-muted-foreground">Paste a URL from any recipe site to auto-fill the form</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Paste a URL from any recipe site to auto-fill the form
+            {!showPaste && (
+              <>
+                {" "}or{" "}
+                <button type="button" onClick={() => setShowPaste(true)} className="font-medium text-primary hover:underline">
+                  paste the recipe text
+                </button>
+              </>
+            )}
+          </p>
+
+          {showPaste && (
+            <div className="mt-3 space-y-2 rounded-xl border border-border p-3">
+              <label htmlFor="pasted-recipe" className="block text-sm font-medium text-foreground">
+                Paste recipe text
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Some sites block imports. Open the recipe, select all (Ctrl+A or ⌘A), copy, and paste it here.
+              </p>
+              <textarea
+                id="pasted-recipe"
+                value={pastedText}
+                onChange={(e) => setPastedText(e.target.value)}
+                rows={6}
+                placeholder="Paste the recipe page here..."
+                className={inputClass + " resize-y"}
+              />
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleImportText}
+                  disabled={importing || !pastedText.trim()}
+                  className="flex h-10 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  {importing ? "Reading..." : "Read recipe"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPaste(false);
+                    setPastedText("");
+                  }}
+                  className="h-10 rounded-xl border border-input px-4 text-sm font-medium text-foreground hover:bg-accent"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Image upload */}
