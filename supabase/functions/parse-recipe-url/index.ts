@@ -18,7 +18,8 @@ const fail = (error: string, status: number, code?: 'blocked' | 'no_recipe') =>
 
 // Claude reads the page text when a site has no structured recipe data.
 // Set the ANTHROPIC_API_KEY secret in Supabase to enable it.
-const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+// Trim stray whitespace or quotes that sneak in when the secret is pasted
+const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY')?.trim().replace(/^["']|["']$/g, '');
 const anthropic = anthropicKey ? new Anthropic({ apiKey: anthropicKey, timeout: 60_000, maxRetries: 1 }) : null;
 
 const AI_SYSTEM = `You extract recipes from the text of a web page.
