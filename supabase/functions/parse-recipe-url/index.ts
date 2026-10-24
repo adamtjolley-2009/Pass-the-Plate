@@ -1,4 +1,5 @@
 import Anthropic from 'npm:@anthropic-ai/sdk@0.137.0';
+import { createClient } from 'npm:@supabase/supabase-js@2.118.0';
 import { extractJsonLdRecipe, htmlToText, normalizeAiRecipe, parseAiJson } from './recipe.ts';
 
 const corsHeaders = {
@@ -55,6 +56,52 @@ const RECIPE_SCHEMA = {
   additionalProperties: false,
 };
 
+// Claude Haiku 5.5 prices in USD per token (prompts under 100K tokens)
+const HAIKU_INPUT_USD = 0.1 / 1_000_000;
+const HAIKU_OUTPUT_USD = 0.5 / 1_000_000;
+
+const supabaseUrl = Deno.env.get('SUPABASE_URL');
+const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+const admin = supabaseUrl && serviceRoleKey ? createClient(supabaseUrl, serviceRoleKey) : null;
+const resendKey = Deno.env.get('RESEND_API_KEY')?.trim();
+
+// Adds this request's cost to the running total and emails once when it passes
+// the alert threshold. Never fails the import.
+async function recordSpend(usage: Anthropic.Usage): Promise<void> {
+  if (!admin) return;
+  try {
+    const cost = usage.input_tokens * HAIKU_INPUT_USD + usage.output_tokens * HAIKU_OUTPUT_USD;
+    const { data, error } = await admin.rpc('record_ai_spend', { cost_usd: cost });
+    if (error) throw error;
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row?.should_alert) return;
+
+    const total = Number(row.total_usd).toFixed(2);
+    console.log(`AI spend passed $${row.alert_threshold_usd}: now $${total}`);
+    if (!resendKey || !row.alert_email) {
+      console.error('Spend alert not sent: RESEND_API_KEY or alert email is missing');
+      return;
+    }
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'Pass the Plate <onboarding@resend.dev>',
+        to: [row.alert_email],
+        subject: `Pass the Plate: recipe import AI spend passed $${row.alert_threshold_usd}`,
+        text:
+          `The recipe importer's Claude API usage has reached about $${total} ` +
+          `(alert threshold: $${row.alert_threshold_usd}).\n\n` +
+          `Check your balance at https://console.anthropic.com/settings/billing\n` +
+          `This is a one-time alert.`,
+      }),
+    });
+    if (!res.ok) console.error('Spend alert email failed:', res.status, await res.text());
+  } catch (error) {
+    console.error('Recording AI spend failed:', error);
+  }
+}
+
 // Asks Claude to pull the recipe out of page text (fetched by us, or pasted by the user)
 async function readWithClaude(pageText: string, source?: string): Promise<Response> {
   if (!anthropic) {
@@ -86,6 +133,7 @@ async function readWithClaude(pageText: string, source?: string): Promise<Respon
     }
     return fail('The recipe reader is having trouble right now. Please try again.', 502);
   }
+  await recordSpend(response.usage);
 
   if (response.stop_reason === 'refusal') {
     console.error('Claude declined:', response.stop_details);
