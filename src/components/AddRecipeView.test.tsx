@@ -25,6 +25,9 @@ vi.mock("@/hooks/useRecipes", () => ({
 vi.mock("@/hooks/useCategories", () => ({
   useCategories: () => ({ categories: ["Breakfast", "Dinner"], addCategory: vi.fn() }),
 }));
+vi.mock("@/lib/image", () => ({
+  shrinkImage: async (file: File) => ({ data: `b64-${file.name}`, mediaType: "image/jpeg" }),
+}));
 vi.mock("@/lib/recipe-store", () => ({ useRecipeStore: () => ({ setActiveView: vi.fn(), stopEditing }) }));
 
 // supabase.functions.invoke reports non-2xx responses as an error whose context is the Response
@@ -70,6 +73,36 @@ describe("AddRecipeView import", () => {
       body: { text: "Banana Bread ... 3 ripe bananas ... Mash. Bake." },
     });
     expect(screen.queryByLabelText("Paste recipe text")).not.toBeInTheDocument();
+  });
+
+  it("reads a recipe from photos of a recipe card", async () => {
+    invoke.mockResolvedValueOnce({
+      data: { success: true, recipe: { title: "Grandma's Pie", ingredients: ["2 cups flour"], steps: ["Bake."] } },
+      error: null,
+    });
+    render(<AddRecipeView />);
+
+    const front = new File(["a"], "front.jpg", { type: "image/jpeg" });
+    const back = new File(["b"], "back.jpg", { type: "image/jpeg" });
+    fireEvent.change(screen.getByTestId("scan-input"), { target: { files: [front, back] } });
+
+    await waitFor(() => expect(screen.getByDisplayValue("Grandma's Pie")).toBeInTheDocument());
+    expect(invoke).toHaveBeenCalledWith("parse-recipe-url", {
+      body: {
+        images: [
+          { data: "b64-front.jpg", mediaType: "image/jpeg" },
+          { data: "b64-back.jpg", mediaType: "image/jpeg" },
+        ],
+      },
+    });
+  });
+
+  it("rejects more than 4 photos", () => {
+    render(<AddRecipeView />);
+    const files = Array.from({ length: 5 }, (_, i) => new File(["x"], `${i}.jpg`, { type: "image/jpeg" }));
+    fireEvent.change(screen.getByTestId("scan-input"), { target: { files } });
+    expect(toastError).toHaveBeenCalledWith("Choose up to 4 photos");
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it("can open the paste box without trying a link first", () => {

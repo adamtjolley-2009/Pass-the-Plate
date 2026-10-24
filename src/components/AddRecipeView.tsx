@@ -7,7 +7,8 @@ import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
 import { Recipe, Substitute } from "@/lib/types";
 import { parseIngredientLine, ingredientToLine } from "@/lib/ingredients";
-import { ImagePlus, X, Link, Loader2 } from "lucide-react";
+import { ImagePlus, X, Link, Loader2, Camera } from "lucide-react";
+import { shrinkImage, Base64Image } from "@/lib/image";
 
 // Public URL of a photo in our recipe-images bucket -> its storage path
 function recipeImagePath(url: string | undefined): string | null {
@@ -48,9 +49,11 @@ export function AddRecipeView({ recipe }: { recipe?: Recipe } = {}) {
   const [importing, setImporting] = useState(false);
   const [showPaste, setShowPaste] = useState(false);
   const [pastedText, setPastedText] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const scanInputRef = useRef<HTMLInputElement>(null);
 
   // Sends a link (or pasted page text) to the importer and fills in the form
-  const runImport = async (body: { url: string } | { text: string }) => {
+  const runImport = async (body: { url: string } | { text: string } | { images: Base64Image[] }) => {
     setImporting(true);
     try {
       const { data, error } = await supabase.functions.invoke("parse-recipe-url", { body });
@@ -96,6 +99,31 @@ export function AddRecipeView({ recipe }: { recipe?: Recipe } = {}) {
 
   const handleImportText = () => {
     if (pastedText.trim()) runImport({ text: pastedText });
+  };
+
+  // Photos of a recipe card or cookbook page (e.g. the front and back of a card)
+  const handleScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    if (files.length === 0) return;
+    if (files.length > 4) {
+      toast.error("Choose up to 4 photos");
+      return;
+    }
+    setScanning(true);
+    try {
+      let images: Base64Image[];
+      try {
+        images = await Promise.all(files.map(shrinkImage));
+      } catch (err) {
+        console.error("Photo error:", err);
+        toast.error("Couldn't open that photo. Try a JPEG or PNG.");
+        return;
+      }
+      await runImport({ images });
+    } finally {
+      setScanning(false);
+    }
   };
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -292,6 +320,28 @@ export function AddRecipeView({ recipe }: { recipe?: Recipe } = {}) {
                 </div>
               </div>
             )}
+
+            <input
+              ref={scanInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleScan}
+              className="hidden"
+              data-testid="scan-input"
+            />
+            <button
+              type="button"
+              onClick={() => scanInputRef.current?.click()}
+              disabled={importing || scanning}
+              className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+            >
+              {scanning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
+              {scanning ? "Reading your recipe..." : "Scan a recipe card"}
+            </button>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Take a photo of a recipe card, cookbook page or handwritten recipe. Add up to 4 photos, like the front and back of a card.
+            </p>
           </div>
         )}
 

@@ -23,12 +23,19 @@ const fail = (error: string, status: number, code?: 'blocked' | 'no_recipe') =>
 const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY')?.trim().replace(/^["']|["']$/g, '');
 const anthropic = anthropicKey ? new Anthropic({ apiKey: anthropicKey, timeout: 60_000, maxRetries: 1 }) : null;
 
-const AI_SYSTEM = `You extract recipes from the text of a web page.
+const AI_SYSTEM = `You extract recipes from web page text or from photos of recipe cards, cookbook pages and handwritten notes.
 Copy the recipe as written: each ingredient line with its quantity and unit (e.g. "400 g spaghetti"), and each step in order.
 Use times like "10 min" or "1 hr 15 min". Set servings to 0 if the page doesn't say.
 Pick the category from: Breakfast, Lunch, Dinner, Appetizers, Desserts, or "" if none fits.
 Only include substitutes the page itself suggests.
-If the page has no recipe, return an empty title and no ingredients.`;
+Read handwriting carefully and give your best reading of unclear words. If a photo has no title, make a short one from the dish.
+If there is no recipe, return an empty title and no ingredients.`;
+
+// Photos the app may send (it shrinks them to JPEG first)
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const;
+type ImageType = (typeof IMAGE_TYPES)[number];
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BASE64 = 5 * 1024 * 1024;
 
 // Structured output: the response is guaranteed to match this shape
 const RECIPE_SCHEMA = {
@@ -102,13 +109,36 @@ async function recordSpend(usage: Anthropic.Usage): Promise<void> {
   }
 }
 
-// Asks Claude to pull the recipe out of page text (fetched by us, or pasted by the user)
-async function readWithClaude(pageText: string, source?: string): Promise<Response> {
+type RecipeInput =
+  | { kind: 'page'; text: string; url: string }
+  | { kind: 'text'; text: string }
+  | { kind: 'photos'; images: { data: string; mediaType: ImageType }[] };
+
+const NOT_FOUND: Record<RecipeInput['kind'], string> = {
+  page: "Couldn't find a recipe on that page.",
+  text: "Couldn't find a recipe in that text.",
+  photos: "Couldn't read a recipe from that photo. Try a closer, well-lit shot.",
+};
+
+function claudeContent(input: RecipeInput): Anthropic.MessageParam['content'] {
+  if (input.kind === 'page') return `Page: ${input.url}\n\n${input.text}`;
+  if (input.kind === 'text') return input.text;
+  return [
+    ...input.images.map((image): Anthropic.ImageBlockParam => ({
+      type: 'image',
+      source: { type: 'base64', media_type: image.mediaType, data: image.data },
+    })),
+    { type: 'text', text: 'Extract the recipe from these photos. They may be the front and back of one card.' },
+  ];
+}
+
+// Asks Claude to pull the recipe out of page text (fetched by us, or pasted by the user) or photos
+async function readWithClaude(input: RecipeInput): Promise<Response> {
   if (!anthropic) {
     console.error('ANTHROPIC_API_KEY is not set; skipping AI fallback');
-    return source
-      ? fail("Couldn't find a recipe on that page.", 422, 'no_recipe')
-      : fail("Reading pasted recipes isn't set up yet. Add the Anthropic API key in Supabase.", 500);
+    return input.kind === 'page'
+      ? fail(NOT_FOUND.page, 422, 'no_recipe')
+      : fail("Reading recipes isn't set up yet. Add the Anthropic API key in Supabase.", 500);
   }
 
   let response: Anthropic.Message;
@@ -117,7 +147,7 @@ async function readWithClaude(pageText: string, source?: string): Promise<Respon
       model: 'claude-haiku-5-5',
       max_tokens: 16000,
       system: AI_SYSTEM,
-      messages: [{ role: 'user', content: source ? `Page: ${source}\n\n${pageText}` : pageText }],
+      messages: [{ role: 'user', content: claudeContent(input) }],
       output_config: {
         effort: 'low',
         format: { type: 'json_schema', schema: RECIPE_SCHEMA },
@@ -137,7 +167,7 @@ async function readWithClaude(pageText: string, source?: string): Promise<Respon
 
   if (response.stop_reason === 'refusal') {
     console.error('Claude declined:', response.stop_details);
-    return fail("Couldn't find a recipe on that page.", 422, 'no_recipe');
+    return fail(NOT_FOUND[input.kind], 422, 'no_recipe');
   }
   const content = response.content
     .map((block) => (block.type === 'text' ? block.text : ''))
@@ -146,7 +176,7 @@ async function readWithClaude(pageText: string, source?: string): Promise<Respon
   const recipe = parsed ? normalizeAiRecipe(parsed) : null;
   if (!recipe) {
     console.error('Unusable AI response:', response.stop_reason, content.slice(0, 500));
-    return fail("Couldn't find a recipe in that text.", 422, 'no_recipe');
+    return fail(NOT_FOUND[input.kind], 422, 'no_recipe');
   }
 
   return json({ success: true, recipe, source: 'ai' });
@@ -158,7 +188,22 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { url, text } = await req.json().catch(() => ({}));
+    const { url, text, images } = await req.json().catch(() => ({}));
+
+    // Photos of a recipe card or cookbook page, as base64
+    if (Array.isArray(images)) {
+      const valid = images.every(
+        (image) =>
+          typeof image?.data === 'string' &&
+          image.data.length > 0 &&
+          image.data.length <= MAX_IMAGE_BASE64 &&
+          IMAGE_TYPES.includes(image.mediaType),
+      );
+      if (!valid || images.length === 0 || images.length > MAX_IMAGES) {
+        return fail(`Add 1 to ${MAX_IMAGES} photos (JPEG or PNG, under 5 MB each).`, 400);
+      }
+      return await readWithClaude({ kind: 'photos', images });
+    }
 
     // Recipe text the user copied from a page we couldn't fetch
     if (typeof text === 'string') {
@@ -166,7 +211,7 @@ Deno.serve(async (req) => {
       if (pageText.length < 50) {
         return fail('Paste the whole recipe, including the ingredients and steps.', 400);
       }
-      return await readWithClaude(pageText);
+      return await readWithClaude({ kind: 'text', text: pageText });
     }
 
     let parsedUrl: URL | null = null;
@@ -224,7 +269,7 @@ Deno.serve(async (req) => {
     if (pageText.length < 100) {
       return fail("Couldn't find a recipe on that page.", 422, 'no_recipe');
     }
-    return await readWithClaude(pageText, parsedUrl.href);
+    return await readWithClaude({ kind: 'page', text: pageText, url: parsedUrl.href });
   } catch (error) {
     console.error('Parse error:', error);
     return fail('Something went wrong importing that recipe. Please try again.', 500);
