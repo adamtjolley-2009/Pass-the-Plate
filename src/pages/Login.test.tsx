@@ -14,7 +14,10 @@ vi.mock("@/integrations/supabase/client", () => ({
     },
   },
 }));
-vi.mock("sonner", () => ({ toast: { success: (...a: unknown[]) => toastSuccess(...a), error: vi.fn() } }));
+const toastError = vi.fn();
+vi.mock("sonner", () => ({
+  toast: { success: (...a: unknown[]) => toastSuccess(...a), error: (...a: unknown[]) => toastError(...a) },
+}));
 
 function submitSignUp() {
   render(<Login />);
@@ -32,6 +35,16 @@ describe("Login sign up", () => {
     submitSignUp();
     await waitFor(() => expect(signUp).toHaveBeenCalled());
     expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it("tells people when the email already has an account", async () => {
+    signUp.mockResolvedValue({ data: { session: null, user: { id: "fake", identities: [] } }, error: null });
+    submitSignUp();
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("An account with this email already exists", expect.anything())
+    );
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Sign In" })).toBeInTheDocument();
   });
 
   it("asks to check email when confirmation is required", async () => {

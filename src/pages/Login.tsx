@@ -26,6 +26,13 @@ const Login = () => {
       });
       if (error) {
         toast.error("Sign up failed", { description: error.message });
+      } else if (data.user && data.user.identities?.length === 0) {
+        // Supabase answers a sign-up for an existing email with a fake user and
+        // sends no email, so the address can't be probed. Point them to sign in.
+        toast.error("An account with this email already exists", {
+          description: "Sign in instead, or use \"Forgot password?\" if you don't remember it.",
+        });
+        setMode("signin");
       } else if (!data.session) {
         // Only needed when email confirmation is turned on; otherwise the
         // new user is signed in right away and taken to profile setup.
