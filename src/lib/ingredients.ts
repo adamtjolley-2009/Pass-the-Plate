@@ -37,14 +37,32 @@ export function parseQuantity(text: string): number {
   return Math.round(total * 100) / 100;
 }
 
+// Words treated as a unit when they follow the quantity, e.g. "2 cups flour".
+// Anything else stays part of the name, so "3 ripe bananas" is 3 × "ripe bananas".
+const UNITS = new Set([
+  "g", "gram", "grams", "kg", "kilogram", "kilograms", "mg",
+  "ml", "milliliter", "milliliters", "millilitre", "millilitres", "l", "liter", "liters", "litre", "litres",
+  "oz", "ounce", "ounces", "lb", "lbs", "pound", "pounds",
+  "cup", "cups", "c", "tbsp", "tbs", "tablespoon", "tablespoons", "tsp", "teaspoon", "teaspoons",
+  "pint", "pints", "pt", "quart", "quarts", "qt", "gallon", "gallons", "fl",
+  "pinch", "pinches", "dash", "dashes", "clove", "cloves", "can", "cans", "jar", "jars",
+  "stick", "sticks", "slice", "slices", "piece", "pieces", "package", "packages", "pkg",
+  "bunch", "bunches", "sprig", "sprigs", "handful", "handfuls", "head", "heads",
+]);
+
 // Parses a line like "400 g spaghetti" into an ingredient.
 // Lines without a leading quantity become a single unit of the whole line.
 export function parseIngredientLine(line: string): Ingredient {
-  const match = line.trim().match(/^([\d./½⅓⅔¼¾⅛]+(?:\s+[\d./½⅓⅔¼¾⅛]+)*)\s*([A-Za-z]+)?\s+(.+)$/);
+  const match = line.trim().match(/^([\d./½⅓⅔¼¾⅛]+(?:\s+[\d./½⅓⅔¼¾⅛]+)*)\s*(.+)$/);
   if (match) {
     const qty = parseQuantity(match[1]);
     if (qty > 0) {
-      return { name: match[3].trim(), quantity: qty, unit: match[2] || "", originalQuantity: qty };
+      const rest = match[2].trim();
+      const unitMatch = rest.match(/^([A-Za-z]+)\.?\s+(.+)$/);
+      if (unitMatch && UNITS.has(unitMatch[1].toLowerCase())) {
+        return { name: unitMatch[2].trim(), quantity: qty, unit: unitMatch[1], originalQuantity: qty };
+      }
+      return { name: rest, quantity: qty, unit: "", originalQuantity: qty };
     }
   }
   return { name: line.trim(), quantity: 1, unit: "", originalQuantity: 1 };
@@ -75,4 +93,10 @@ export function formatQuantity(q: number): string {
   const match = DISPLAY_FRACTIONS.find(([value]) => Math.abs(frac - value) < 0.02);
   if (!match) return String(Number(q.toFixed(2)));
   return whole ? `${whole} ${match[1]}` : match[1];
+}
+
+// Turns a saved ingredient back into the line it was typed as, e.g. "1 ½ cups flour".
+// Uses the base-servings quantity so editing doesn't bake in any scaling.
+export function ingredientToLine(ing: Ingredient): string {
+  return [formatQuantity(ing.originalQuantity), ing.unit, ing.name].filter(Boolean).join(" ");
 }

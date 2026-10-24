@@ -1,32 +1,47 @@
 import { useState, useRef } from "react";
 import { useRecipeStore } from "@/lib/recipe-store";
-import { useAddRecipe } from "@/hooks/useRecipes";
+import { useAddRecipe, useUpdateRecipe } from "@/hooks/useRecipes";
 import { useCategories } from "@/hooks/useCategories";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
 import { Recipe, Substitute } from "@/lib/types";
-import { parseIngredientLine } from "@/lib/ingredients";
+import { parseIngredientLine, ingredientToLine } from "@/lib/ingredients";
 import { ImagePlus, X, Link, Loader2 } from "lucide-react";
 
-export function AddRecipeView() {
-  const { setActiveView } = useRecipeStore();
+// Public URL of a photo in our recipe-images bucket -> its storage path
+function recipeImagePath(url: string | undefined): string | null {
+  const marker = "/storage/v1/object/public/recipe-images/";
+  const i = url?.indexOf(marker) ?? -1;
+  return url && i >= 0 ? decodeURIComponent(url.slice(i + marker.length)) : null;
+}
+
+const timeOrEmpty = (value: string) => (value === "—" ? "" : value);
+
+// With `recipe`, the form edits that recipe instead of adding a new one
+export function AddRecipeView({ recipe }: { recipe?: Recipe } = {}) {
+  const { setActiveView, stopEditing } = useRecipeStore();
   const { user } = useAuth();
   const addRecipeMutation = useAddRecipe();
+  const updateRecipeMutation = useUpdateRecipe();
+  const saving = addRecipeMutation.isPending || updateRecipeMutation.isPending;
   const { categories, addCategory } = useCategories();
   const [addingCategory, setAddingCategory] = useState(false);
   const [newCategory, setNewCategory] = useState("");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [prepTime, setPrepTime] = useState("");
-  const [cookTime, setCookTime] = useState("");
-  const [servings, setServings] = useState("4");
-  const [ingredientsText, setIngredientsText] = useState("");
-  const [stepsText, setStepsText] = useState("");
-  const [substitutesText, setSubstitutesText] = useState("");
-  const [category, setCategory] = useState("");
+  const [title, setTitle] = useState(recipe?.title ?? "");
+  const [description, setDescription] = useState(recipe?.description ?? "");
+  const [prepTime, setPrepTime] = useState(recipe ? timeOrEmpty(recipe.prepTime) : "");
+  const [cookTime, setCookTime] = useState(recipe ? timeOrEmpty(recipe.cookTime) : "");
+  const [servings, setServings] = useState(String(recipe?.baseServings ?? 4));
+  const [ingredientsText, setIngredientsText] = useState(recipe?.ingredients.map(ingredientToLine).join("\n") ?? "");
+  const [stepsText, setStepsText] = useState(recipe?.steps.join("\n") ?? "");
+  const [substitutesText, setSubstitutesText] = useState(
+    recipe?.substitutes?.map((s) => (s.replacement ? `${s.original} → ${s.replacement}` : s.original)).join("\n") ?? ""
+  );
+  const [category, setCategory] = useState(recipe?.tags[0] ?? "");
   const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  // An existing photo's URL, or a blob: URL for a newly picked file
+  const [imagePreview, setImagePreview] = useState<string | null>(recipe?.imageUrl ?? null);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [recipeUrl, setRecipeUrl] = useState("");
@@ -94,13 +109,13 @@ export function AddRecipeView() {
       toast.error("Image must be under 5MB");
       return;
     }
-    if (imagePreview) URL.revokeObjectURL(imagePreview);
+    if (imagePreview?.startsWith("blob:")) URL.revokeObjectURL(imagePreview);
     setImageFile(file);
     setImagePreview(URL.createObjectURL(file));
   };
 
   const clearImage = () => {
-    if (imagePreview) URL.revokeObjectURL(imagePreview);
+    if (imagePreview?.startsWith("blob:")) URL.revokeObjectURL(imagePreview);
     setImageFile(null);
     setImagePreview(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -131,7 +146,8 @@ export function AddRecipeView() {
       });
     const baseServings = parseInt(servings) || 4;
 
-    let imageUrl: string | undefined;
+    // Keep the current photo unless it was removed or replaced
+    let imageUrl: string | undefined = imagePreview && !imageFile ? imagePreview : undefined;
     if (imageFile && user) {
       setUploading(true);
       const ext = imageFile.name.split(".").pop();
@@ -151,8 +167,9 @@ export function AddRecipeView() {
       setUploading(false);
     }
 
-    const recipe: Recipe = {
-      id: crypto.randomUUID(),
+    const saved: Recipe = {
+      ...recipe,
+      id: recipe?.id ?? crypto.randomUUID(),
       title: title.trim(),
       description: description.trim(),
       prepTime: prepTime || "—",
@@ -163,14 +180,25 @@ export function AddRecipeView() {
       steps,
       substitutes,
       tags: category ? [category] : [],
-      author: "You",
+      author: recipe?.author ?? "You",
       imageUrl,
     };
 
     try {
-      await addRecipeMutation.mutateAsync(recipe);
-      toast.success("Recipe added!");
-      setActiveView("library");
+      if (recipe) {
+        await updateRecipeMutation.mutateAsync(saved);
+        // Best effort: delete the old photo if it was replaced or removed
+        const oldPath = recipeImagePath(recipe.imageUrl);
+        if (oldPath && recipe.imageUrl !== imageUrl) {
+          await supabase.storage.from("recipe-images").remove([oldPath]);
+        }
+        toast.success("Recipe updated!");
+        stopEditing();
+      } else {
+        await addRecipeMutation.mutateAsync(saved);
+        toast.success("Recipe added!");
+        setActiveView("library");
+      }
     } catch {
       toast.error("Failed to save recipe. Please try again.");
     }
@@ -185,85 +213,87 @@ export function AddRecipeView() {
         className="font-display font-semibold text-foreground mb-6"
         style={{ fontSize: "clamp(1.5rem, 4vw, 2.25rem)", letterSpacing: "-0.03em" }}
       >
-        Add Recipe
+        {recipe ? "Edit Recipe" : "Add Recipe"}
       </h1>
 
       <form onSubmit={handleSubmit} className="max-w-2xl space-y-5">
-        {/* URL import */}
-        <div>
-          <label className="mb-1.5 block text-sm font-medium text-foreground">Import from URL</label>
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Link className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <input
-                value={recipeUrl}
-                onChange={(e) => setRecipeUrl(e.target.value)}
-                placeholder="Paste a recipe URL..."
-                className={inputClass + " pl-9"}
-              />
-            </div>
-            <button
-              type="button"
-              onClick={handleImportUrl}
-              disabled={importing || !recipeUrl.trim()}
-              className="h-[46px] rounded-xl bg-primary px-4 font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 flex items-center gap-2"
-            >
-              {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              {importing ? "Importing..." : "Import"}
-            </button>
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Paste a URL from any recipe site to auto-fill the form
-            {!showPaste && (
-              <>
-                {" "}or{" "}
-                <button type="button" onClick={() => setShowPaste(true)} className="font-medium text-primary hover:underline">
-                  paste the recipe text
-                </button>
-              </>
-            )}
-          </p>
-
-          {showPaste && (
-            <div className="mt-3 space-y-2 rounded-xl border border-border p-3">
-              <label htmlFor="pasted-recipe" className="block text-sm font-medium text-foreground">
-                Paste recipe text
-              </label>
-              <p className="text-xs text-muted-foreground">
-                Some sites block imports. Open the recipe, select all (Ctrl+A or ⌘A), copy, and paste it here.
-              </p>
-              <textarea
-                id="pasted-recipe"
-                value={pastedText}
-                onChange={(e) => setPastedText(e.target.value)}
-                rows={6}
-                placeholder="Paste the recipe page here..."
-                className={inputClass + " resize-y"}
-              />
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleImportText}
-                  disabled={importing || !pastedText.trim()}
-                  className="flex h-10 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-                >
-                  {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                  {importing ? "Reading..." : "Read recipe"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowPaste(false);
-                    setPastedText("");
-                  }}
-                  className="h-10 rounded-xl border border-input px-4 text-sm font-medium text-foreground hover:bg-accent"
-                >
-                  Cancel
-                </button>
+        {/* URL import (new recipes only) */}
+        {!recipe && (
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-foreground">Import from URL</label>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Link className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  value={recipeUrl}
+                  onChange={(e) => setRecipeUrl(e.target.value)}
+                  placeholder="Paste a recipe URL..."
+                  className={inputClass + " pl-9"}
+                />
               </div>
+              <button
+                type="button"
+                onClick={handleImportUrl}
+                disabled={importing || !recipeUrl.trim()}
+                className="h-[46px] rounded-xl bg-primary px-4 font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50 flex items-center gap-2"
+              >
+                {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {importing ? "Importing..." : "Import"}
+              </button>
             </div>
-          )}
-        </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Paste a URL from any recipe site to auto-fill the form
+              {!showPaste && (
+                <>
+                  {" "}or{" "}
+                  <button type="button" onClick={() => setShowPaste(true)} className="font-medium text-primary hover:underline">
+                    paste the recipe text
+                  </button>
+                </>
+              )}
+            </p>
+
+            {showPaste && (
+              <div className="mt-3 space-y-2 rounded-xl border border-border p-3">
+                <label htmlFor="pasted-recipe" className="block text-sm font-medium text-foreground">
+                  Paste recipe text
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  Some sites block imports. Open the recipe, select all (Ctrl+A or ⌘A), copy, and paste it here.
+                </p>
+                <textarea
+                  id="pasted-recipe"
+                  value={pastedText}
+                  onChange={(e) => setPastedText(e.target.value)}
+                  rows={6}
+                  placeholder="Paste the recipe page here..."
+                  className={inputClass + " resize-y"}
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleImportText}
+                    disabled={importing || !pastedText.trim()}
+                    className="flex h-10 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                  >
+                    {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                    {importing ? "Reading..." : "Read recipe"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPaste(false);
+                      setPastedText("");
+                    }}
+                    className="h-10 rounded-xl border border-input px-4 text-sm font-medium text-foreground hover:bg-accent"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Image upload */}
         <div>
@@ -429,13 +459,25 @@ export function AddRecipeView() {
           )}
         </div>
 
-        <button
-          type="submit"
-          disabled={addRecipeMutation.isPending || uploading}
-          className="h-11 rounded-xl bg-primary px-6 font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-        >
-          {uploading ? "Uploading image..." : addRecipeMutation.isPending ? "Saving..." : "Save Recipe"}
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="submit"
+            disabled={saving || uploading}
+            className="h-11 rounded-xl bg-primary px-6 font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            {uploading ? "Uploading image..." : saving ? "Saving..." : recipe ? "Save Changes" : "Save Recipe"}
+          </button>
+          {recipe && (
+            <button
+              type="button"
+              onClick={stopEditing}
+              disabled={saving || uploading}
+              className="h-11 rounded-xl border border-input px-6 font-medium text-foreground hover:bg-accent disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
       </form>
     </div>
   );

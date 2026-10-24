@@ -14,7 +14,7 @@ import { Plus, X } from "lucide-react";
 import { toast } from "sonner";
 
 export function MainContent() {
-  const { activeView, selectedRecipeId, selectRecipe } = useRecipeStore();
+  const { activeView, selectedRecipeId, editingRecipeId, selectRecipe } = useRecipeStore();
   const { data: recipes = [], isLoading } = useRecipes();
   const { categories: userCategories, addCategory, removeCategory, isCustom } = useCategories();
   const categories = ["All", ...userCategories];
@@ -44,6 +44,9 @@ export function MainContent() {
   if (activeView === "groups") return <GroupsView />;
   if (activeView === "add") return <AddRecipeView />;
   if (activeView === "profile") return <ProfileView />;
+
+  const editingRecipe = editingRecipeId ? recipes.find((r) => r.id === editingRecipeId) : undefined;
+  if (editingRecipe) return <AddRecipeView key={editingRecipe.id} recipe={editingRecipe} />;
 
   const filteredRecipes = activeCategory === "All"
     ? recipes

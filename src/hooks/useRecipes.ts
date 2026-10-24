@@ -34,10 +34,9 @@ function dbToRecipe(row: Tables<"recipes">): Recipe {
   };
 }
 
-// Convert app Recipe to DB insert format
-function recipeToDb(recipe: Recipe, userId: string): TablesInsert<"recipes"> {
+// The recipe fields a user can edit, in DB format
+function recipeFields(recipe: Recipe) {
   return {
-    user_id: userId,
     title: recipe.title,
     description: recipe.description || null,
     prep_time: recipe.prepTime || null,
@@ -54,7 +53,12 @@ function recipeToDb(recipe: Recipe, userId: string): TablesInsert<"recipes"> {
     tags: recipe.tags,
     image_url: recipe.imageUrl || null,
     is_favorite: recipe.isFavorite ?? false,
-  };
+  } satisfies TablesUpdate<"recipes">;
+}
+
+// Convert app Recipe to DB insert format
+function recipeToDb(recipe: Recipe, userId: string): TablesInsert<"recipes"> {
+  return { user_id: userId, ...recipeFields(recipe) };
 }
 
 export function useRecipes() {
@@ -116,12 +120,15 @@ export function useUpdateRecipe() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({ id, updates }: { id: string; updates: TablesUpdate<"recipes"> }) => {
-      const { error } = await supabase
+    mutationFn: async (recipe: Recipe) => {
+      const { data, error } = await supabase
         .from("recipes")
-        .update(updates)
-        .eq("id", id);
+        .update(recipeFields(recipe))
+        .eq("id", recipe.id)
+        .select("id");
       if (error) throw error;
+      // Row-level security silently skips recipes you don't own
+      if (!data?.length) throw new Error("Recipe not found or not yours to edit");
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["recipes"] });

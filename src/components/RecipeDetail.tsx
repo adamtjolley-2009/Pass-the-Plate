@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Clock, Copy, Trash2, ArrowRightLeft, ArrowLeft } from "lucide-react";
+import { Clock, Copy, Trash2, ArrowRightLeft, ArrowLeft, Pencil } from "lucide-react";
 import { Recipe } from "@/lib/types";
 import { useRecipeStore } from "@/lib/recipe-store";
 import { useDeleteRecipe } from "@/hooks/useRecipes";
@@ -19,7 +19,7 @@ interface RecipeDetailProps {
 }
 
 export function RecipeDetail({ recipe, readOnly = false, onBack, backLabel = "Back" }: RecipeDetailProps) {
-  const { toggleIngredientCheck, checkedIngredients, selectRecipe } = useRecipeStore();
+  const { toggleIngredientCheck, checkedIngredients, selectRecipe, startEditing } = useRecipeStore();
   const deleteRecipeMutation = useDeleteRecipe();
   const checked = checkedIngredients[recipe.id] || new Set();
 
@@ -124,7 +124,7 @@ export function RecipeDetail({ recipe, readOnly = false, onBack, backLabel = "Ba
         </div>
 
         {/* Servings */}
-        <div className="mb-6 flex items-center justify-between">
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <ServingStepper
             servings={servings}
             onChange={setServings}
@@ -136,6 +136,14 @@ export function RecipeDetail({ recipe, readOnly = false, onBack, backLabel = "Ba
             >
               <Copy className="h-3.5 w-3.5" /> Copy
             </button>
+            {!readOnly && (
+              <button
+                onClick={() => startEditing(recipe.id)}
+                className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <Pencil className="h-3.5 w-3.5" /> Edit
+              </button>
+            )}
             {!readOnly && (
               <button
                 onClick={handleDelete}
