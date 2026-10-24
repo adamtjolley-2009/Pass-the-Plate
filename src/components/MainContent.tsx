@@ -14,7 +14,7 @@ import { Plus, X } from "lucide-react";
 import { toast } from "sonner";
 
 export function MainContent() {
-  const { activeView, selectedRecipeId, editingRecipeId, selectRecipe } = useRecipeStore();
+  const { activeView, selectedRecipeId, editingRecipeId, selectRecipe, setActiveView } = useRecipeStore();
   const { data: recipes = [], isLoading } = useRecipes();
   const { categories: userCategories, addCategory, removeCategory, isCustom } = useCategories();
   const categories = ["All", ...userCategories];
@@ -126,13 +126,19 @@ export function MainContent() {
             </button>
           )}
         </div>
+        <button
+          onClick={() => setActiveView("add")}
+          className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+        >
+          <Plus className="h-4 w-4" /> Add Recipe
+        </button>
         {isLoading ? (
           <div className="flex justify-center py-8">
             <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
           </div>
         ) : filteredRecipes.length === 0 ? (
           <p className="px-1 text-sm text-muted-foreground">
-            {recipes.length === 0 ? "No recipes yet. Use Add Recipe to create one." : "No recipes in this category."}
+            {recipes.length === 0 ? "No recipes yet. Tap Add Recipe to create one." : "No recipes in this category."}
           </p>
         ) : (
           filteredRecipes.map((recipe) => (
