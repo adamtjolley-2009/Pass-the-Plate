@@ -3,6 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import type { Json, Tables, TablesInsert, TablesUpdate } from "@/integrations/supabase/types";
 import { Recipe, Ingredient, Substitute } from "@/lib/types";
+import { recipeImagePath } from "@/lib/recipe-images";
 
 type StoredIngredient = Omit<Ingredient, "originalQuantity"> & { originalQuantity?: number };
 
@@ -183,6 +184,56 @@ export function useCopyRecipe() {
           original_author_id: finalAuthorId,
         });
       if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["recipes"] });
+    },
+  });
+}
+
+// Gives the copy its own photo file, so editing or deleting one recipe's photo
+// never breaks the other. Returns undefined if the photo couldn't be copied.
+async function copyRecipeImage(imageUrl: string, userId: string): Promise<string | undefined> {
+  const path = recipeImagePath(imageUrl);
+  if (!path) return imageUrl; // Not in our storage (we never delete those), so share the link
+  try {
+    const res = await fetch(imageUrl);
+    if (!res.ok) throw new Error(`Photo download failed (${res.status})`);
+    const blob = await res.blob();
+    const ext = path.split(".").pop() || "jpg";
+    const newPath = `${userId}/${crypto.randomUUID()}.${ext}`;
+    const { error } = await supabase.storage
+      .from("recipe-images")
+      .upload(newPath, blob, { contentType: blob.type || undefined });
+    if (error) throw error;
+    return supabase.storage.from("recipe-images").getPublicUrl(newPath).data.publicUrl;
+  } catch (error) {
+    console.error("Copying recipe photo failed:", error);
+    return undefined;
+  }
+}
+
+export function useDuplicateRecipe() {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    // Resolves to the new recipe's id and whether its photo came along
+    mutationFn: async (recipe: Recipe) => {
+      if (!user) throw new Error("Not authenticated");
+      const imageUrl = recipe.imageUrl ? await copyRecipeImage(recipe.imageUrl, user.id) : undefined;
+      const { data, error } = await supabase
+        .from("recipes")
+        .insert({
+          ...recipeToDb({ ...recipe, title: `${recipe.title} (copy)`, imageUrl, isFavorite: false }, user.id),
+          // Keep the credit if the original came from a friend
+          original_author_name: recipe.author !== "You" ? recipe.author : null,
+          original_author_id: recipe.authorId ?? null,
+        })
+        .select("id")
+        .single();
+      if (error) throw error;
+      return { id: data.id, photoCopied: !recipe.imageUrl || !!imageUrl };
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["recipes"] });

@@ -1,9 +1,9 @@
 import { useState, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Clock, Copy, Trash2, ArrowRightLeft, ArrowLeft, Pencil } from "lucide-react";
+import { Clock, Copy, CopyPlus, Trash2, ArrowRightLeft, ArrowLeft, Pencil, Loader2 } from "lucide-react";
 import { Recipe } from "@/lib/types";
 import { useRecipeStore } from "@/lib/recipe-store";
-import { useDeleteRecipe } from "@/hooks/useRecipes";
+import { useDeleteRecipe, useDuplicateRecipe } from "@/hooks/useRecipes";
 import { ServingStepper } from "./ServingStepper";
 import { IngredientItem } from "./IngredientItem";
 import { formatQuantity } from "@/lib/ingredients";
@@ -21,6 +21,7 @@ interface RecipeDetailProps {
 export function RecipeDetail({ recipe, readOnly = false, onBack, backLabel = "Back" }: RecipeDetailProps) {
   const { toggleIngredientCheck, checkedIngredients, selectRecipe, startEditing } = useRecipeStore();
   const deleteRecipeMutation = useDeleteRecipe();
+  const duplicateRecipeMutation = useDuplicateRecipe();
   const checked = checkedIngredients[recipe.id] || new Set();
 
   const [servings, setServings] = useState(recipe.currentServings);
@@ -49,6 +50,17 @@ export function RecipeDetail({ recipe, readOnly = false, onBack, backLabel = "Ba
       toast.success("Ingredients copied to clipboard");
     } catch {
       toast.error("Couldn't copy to clipboard");
+    }
+  };
+
+  const handleDuplicate = async () => {
+    try {
+      const { id, photoCopied } = await duplicateRecipeMutation.mutateAsync(recipe);
+      selectRecipe(id);
+      if (photoCopied) toast.success("Recipe duplicated");
+      else toast.success("Recipe duplicated, but the photo couldn't be copied");
+    } catch {
+      toast.error("Failed to duplicate recipe");
     }
   };
 
@@ -136,6 +148,20 @@ export function RecipeDetail({ recipe, readOnly = false, onBack, backLabel = "Ba
             >
               <Copy className="h-3.5 w-3.5" /> Copy
             </button>
+            {!readOnly && (
+              <button
+                onClick={handleDuplicate}
+                disabled={duplicateRecipeMutation.isPending}
+                className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+              >
+                {duplicateRecipeMutation.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <CopyPlus className="h-3.5 w-3.5" />
+                )}
+                Duplicate
+              </button>
+            )}
             {!readOnly && (
               <button
                 onClick={() => startEditing(recipe.id)}

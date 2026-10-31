@@ -9,13 +9,7 @@ import { Recipe, Substitute } from "@/lib/types";
 import { parseIngredientLine, ingredientToLine } from "@/lib/ingredients";
 import { ImagePlus, X, Link, Loader2, Camera } from "lucide-react";
 import { shrinkImage, Base64Image } from "@/lib/image";
-
-// Public URL of a photo in our recipe-images bucket -> its storage path
-function recipeImagePath(url: string | undefined): string | null {
-  const marker = "/storage/v1/object/public/recipe-images/";
-  const i = url?.indexOf(marker) ?? -1;
-  return url && i >= 0 ? decodeURIComponent(url.slice(i + marker.length)) : null;
-}
+import { recipeImagePath } from "@/lib/recipe-images";
 
 const timeOrEmpty = (value: string) => (value === "—" ? "" : value);
 
